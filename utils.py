@@ -6,6 +6,8 @@ from datetime import datetime
 
 import pandas as pd
 from dotenv import load_dotenv
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from openai import OpenAI
 
@@ -44,8 +46,24 @@ Dining: The on-site restaurant serves a highly-rated breakfast with local produc
 On-site Amenities: Includes a lakeside garden with plenty of sun loungers, an outdoor fireplace and barbecue area, a sauna for relaxation, and indoor entertainment like billiards and table tennis."""
 
 def get_rybical_reviews():
-    flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-    creds = flow.run_local_server(port=0)
+    token_json = os.getenv("GOOGLE_TOKEN_JSON")
+    if token_json:
+        # Streamlit Cloud: use pre-generated token stored in secrets
+        token_data = json.loads(token_json)
+        creds = Credentials(
+            token=token_data.get("token"),
+            refresh_token=token_data.get("refresh_token"),
+            token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=token_data.get("client_id"),
+            client_secret=token_data.get("client_secret"),
+            scopes=token_data.get("scopes"),
+        )
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+    else:
+        # Local development: use browser-based OAuth flow
+        flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+        creds = flow.run_local_server(port=0)
     headers = {
         "Authorization": f"Bearer {creds.token}",
         "Content-Type": "application/json",
