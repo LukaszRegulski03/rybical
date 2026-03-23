@@ -1,4 +1,14 @@
+import os
 import streamlit as st
+
+# Inject Streamlit Cloud secrets into env vars before utils is imported.
+# On Streamlit Cloud: st.secrets holds the credentials set in the dashboard.
+# Locally: this silently does nothing and load_dotenv() in utils.py handles it.
+try:
+    os.environ.update({k: str(v) for k, v in st.secrets.items()})
+except Exception:
+    pass
+
 import pandas as pd
 from datetime import datetime, timedelta
 from utils import (
