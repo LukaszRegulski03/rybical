@@ -54,6 +54,7 @@ if "user_email" not in st.session_state:
             st.title("🏨 Panel Opinii")
             login_url = get_google_login_url(REDIRECT_URI)
             st.link_button("Zaloguj się przez Google", login_url, use_container_width=True, type="primary")
+            st.caption(f"debug — redirect URI: `{REDIRECT_URI}`")
         st.stop()
 
 STAR_MAP = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
