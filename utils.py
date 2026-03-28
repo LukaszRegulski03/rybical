@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import os
 import re
@@ -37,16 +39,45 @@ LOGIN_SCOPES = [
 openai_client = OpenAI(api_key=os.getenv("CONFIG__OPENAI__KEY"))
 
 
+def _pkce_pair() -> tuple[str, str]:
+    """Generate a (code_verifier, code_challenge) pair for PKCE."""
+    verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    return verifier, challenge
+
+
 def get_google_login_url(redirect_uri: str) -> str:
+    """Build the Google OAuth URL with PKCE. The code_verifier is carried
+    in the OAuth state parameter so it survives the browser redirect."""
+    verifier, challenge = _pkce_pair()
+    # Encode verifier into the state param so we can retrieve it on callback
+    state = base64.urlsafe_b64encode(
+        json.dumps({"v": verifier}).encode()
+    ).decode().rstrip("=")
+
     flow = Flow.from_client_config(client_config, scopes=LOGIN_SCOPES, redirect_uri=redirect_uri)
-    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        state=state,
+        code_challenge=challenge,
+        code_challenge_method="S256",
+    )
     return auth_url
 
 
-def complete_google_login(code: str, redirect_uri: str) -> dict:
+def complete_google_login(code: str, redirect_uri: str, state: str) -> dict:
     """Exchange OAuth code for user info + serialisable credential data."""
+    # Recover code_verifier from the state parameter
+    padding = 4 - len(state) % 4
+    verifier = json.loads(
+        base64.urlsafe_b64decode(state + "=" * padding).decode()
+    ).get("v", "")
+
     flow = Flow.from_client_config(client_config, scopes=LOGIN_SCOPES, redirect_uri=redirect_uri)
-    flow.fetch_token(code=code)
+    flow.fetch_token(code=code, code_verifier=verifier)
     creds = flow.credentials
     resp = requests.get(
         "https://www.googleapis.com/oauth2/v2/userinfo",
