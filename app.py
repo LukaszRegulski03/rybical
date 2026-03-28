@@ -2,7 +2,6 @@ import os
 import tomllib
 from pathlib import Path
 import streamlit as st
-import bcrypt
 
 # Inject Streamlit Cloud secrets into env vars before utils is imported.
 # On Streamlit Cloud: st.secrets holds the credentials set in the dashboard.
@@ -19,6 +18,8 @@ from utils import (
     parse_reviews_to_lists,
     analyze_review_and_suggest_response,
     generate_analytics_dashboard,
+    get_google_login_url,
+    get_google_user_info,
 )
 
 st.set_page_config(
@@ -44,37 +45,43 @@ def load_restaurants() -> dict:
     return {loc["id"]: loc for loc in data["locations"]}
 
 
-# ── Authentication ────────────────────────────────────────────────────────────
-def authenticate(username: str, password: str) -> bool:
-    users = load_users()
-    if username not in users:
-        return False
-    stored_hash = users[username].get("password_hash", "")
-    if not stored_hash:
-        return False
-    return bcrypt.checkpw(password.encode(), stored_hash.encode())
+# ── Google OAuth login gate ───────────────────────────────────────────────────
+REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8501")
 
-
-# ── Login gate ────────────────────────────────────────────────────────────────
-if "user" not in st.session_state:
-    _, col, _ = st.columns([1, 1, 1])
-    with col:
-        st.title("🏨 Panel Opinii")
-        username = st.text_input("Użytkownik")
-        password = st.text_input("Hasło", type="password")
-        if st.button("Zaloguj się", type="primary", use_container_width=True):
-            if authenticate(username, password):
-                st.session_state.user = username
+if "user_email" not in st.session_state:
+    code = st.query_params.get("code")
+    if code:
+        # Returning from Google — exchange code for user info
+        try:
+            info = get_google_user_info(code, REDIRECT_URI)
+            email = info.get("email", "")
+            users = load_users()
+            if email in users:
+                st.session_state.user_email = email
+                st.session_state.user_name = info.get("name", email)
+                st.query_params.clear()
                 st.rerun()
             else:
-                st.error("Nieprawidłowy użytkownik lub hasło.")
-    st.stop()
+                st.query_params.clear()
+                st.error(f"Brak dostępu. Konto **{email}** nie jest autoryzowane.")
+                st.stop()
+        except Exception as e:
+            st.query_params.clear()
+            st.error(f"Błąd logowania: {e}")
+            st.stop()
+    else:
+        _, col, _ = st.columns([1, 1, 1])
+        with col:
+            st.title("🏨 Panel Opinii")
+            login_url = get_google_login_url(REDIRECT_URI)
+            st.link_button("Zaloguj się przez Google", login_url, use_container_width=True, type="primary")
+        st.stop()
 
 STAR_MAP = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
 
 # ── Resolve visible restaurants for this user ─────────────────────────────────
 _all_restaurants = load_restaurants()
-_user_cfg = load_users()[st.session_state.user]
+_user_cfg = load_users()[st.session_state.user_email]
 _allowed = _user_cfg.get("locations", [])
 if _allowed == ["all"]:
     visible_restaurants = _all_restaurants
@@ -121,9 +128,11 @@ def all_parsed() -> list:
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🏨 Panel Opinii")
-    st.caption(f"Zalogowany: **{st.session_state.user}**")
+    st.caption(f"Zalogowany: **{st.session_state.user_name}**")
+    st.caption(st.session_state.user_email)
     if st.button("Wyloguj", use_container_width=True):
-        del st.session_state.user
+        del st.session_state.user_email
+        del st.session_state.user_name
         st.rerun()
     st.divider()
 

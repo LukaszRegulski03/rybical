@@ -1,22 +1,15 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# User configuration
+# User access control — keyed by Google account email address.
 #
-# HOW TO SET A PASSWORD:
-#   python scripts/hash_password.py
-#   → paste the printed hash as the password_hash value below
+# When someone logs in with Google, their email is checked against this list.
+# If not found, access is denied.
 #
-# locations = ["all"]              → user sees every property
-# locations = ["ID1", "ID2"]       → user sees only those location IDs
+# locations = ["all"]          → sees every property (owner)
+# locations = ["ID1", "ID2"]  → sees only those location IDs (manager)
 # ─────────────────────────────────────────────────────────────────────────────
 
-[users.owner]
-password_hash = "$2b$12$N7.96vAqhdPvNTyaqOOC.O.ONsi2v9.2PLGSvzJ6m7pAC.5Beufr6"   # CHANGE: admin123
-locations     = ["all"]
+[users."regulskiu@gmail.com"]
+locations = ["all"]
 
-[users.manager_rybical]
-password_hash = "$2b$12$5TAtLnPC16YsLj3TEBAmF.QPRoQdko8xVtJQ6M2z9.2npEtpjtHwG"   # CHANGE: rybical1
-locations     = ["8962787873732607458"]
-
-[users.lukasz]
-password_hash = "$2b$12$ymvO1mjJW81FR5M.pDy8i.Ly3wasfXZNurE3ICHn7zQV296L5iE6O"   # CHANGE: lukasz
-locations     = ["8962787873732607458"]
+[users."lukasz@imprv.ai"]
+locations = ["8962787873732607458"]

@@ -8,7 +8,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow, Flow
 from openai import OpenAI
 
 load_dotenv()
@@ -26,6 +26,27 @@ client_config = {
 }
 
 SCOPES = ["https://www.googleapis.com/auth/business.manage"]
+
+IDENTITY_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
+
+def get_google_login_url(redirect_uri: str) -> str:
+    flow = Flow.from_client_config(client_config, scopes=IDENTITY_SCOPES, redirect_uri=redirect_uri)
+    auth_url, _ = flow.authorization_url(access_type="offline", prompt="select_account")
+    return auth_url
+
+def get_google_user_info(code: str, redirect_uri: str) -> dict:
+    """Exchange OAuth code for user email and name."""
+    flow = Flow.from_client_config(client_config, scopes=IDENTITY_SCOPES, redirect_uri=redirect_uri)
+    flow.fetch_token(code=code)
+    resp = requests.get(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {flow.credentials.token}"},
+    )
+    return resp.json()  # {email, name, picture, ...}
 
 # OpenAI Config
 openai_client = OpenAI(api_key=os.getenv("CONFIG__OPENAI__KEY"))
