@@ -1,41 +1,107 @@
 import os
+import tomllib
+from pathlib import Path
 import streamlit as st
+import bcrypt
 
 # Inject Streamlit Cloud secrets into env vars before utils is imported.
 # On Streamlit Cloud: st.secrets holds the credentials set in the dashboard.
 # Locally: this silently does nothing and load_dotenv() in utils.py handles it.
 try:
-    os.environ.update({k: str(v) for k, v in st.secrets.items()})
+    os.environ.update({k: str(v) for k, v in st.secrets.items() if isinstance(v, str)})
 except Exception:
     pass
 
 import pandas as pd
 from datetime import datetime, timedelta
 from utils import (
-    get_rybical_reviews,
+    get_reviews,
     parse_reviews_to_lists,
     analyze_review_and_suggest_response,
     generate_analytics_dashboard,
 )
 
 st.set_page_config(
-    page_title="Pulpit Pensjonatu Rybical",
+    page_title="Panel Opinii",
     page_icon="🏨",
     layout="wide"
 )
 
+# ── Config loaders ────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_users() -> dict:
+    path = Path(__file__).parent / "config" / "users.toml"
+    with open(path, "rb") as f:
+        return tomllib.load(f)["users"]
+
+
+@st.cache_resource
+def load_restaurants() -> dict:
+    """Returns {location_id: {name, account_id, context}} for all properties."""
+    path = Path(__file__).parent / "config" / "restaurants.toml"
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    return {loc["id"]: loc for loc in data["locations"]}
+
+
+# ── Authentication ────────────────────────────────────────────────────────────
+def authenticate(username: str, password: str) -> bool:
+    users = load_users()
+    if username not in users:
+        return False
+    stored_hash = users[username].get("password_hash", "")
+    if not stored_hash:
+        return False
+    return bcrypt.checkpw(password.encode(), stored_hash.encode())
+
+
+# ── Login gate ────────────────────────────────────────────────────────────────
+if "user" not in st.session_state:
+    _, col, _ = st.columns([1, 1, 1])
+    with col:
+        st.title("🏨 Panel Opinii")
+        username = st.text_input("Użytkownik")
+        password = st.text_input("Hasło", type="password")
+        if st.button("Zaloguj się", type="primary", use_container_width=True):
+            if authenticate(username, password):
+                st.session_state.user = username
+                st.rerun()
+            else:
+                st.error("Nieprawidłowy użytkownik lub hasło.")
+    st.stop()
+
 STAR_MAP = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
 
+# ── Resolve visible restaurants for this user ─────────────────────────────────
+_all_restaurants = load_restaurants()
+_user_cfg = load_users()[st.session_state.user]
+_allowed = _user_cfg.get("locations", [])
+if _allowed == ["all"]:
+    visible_restaurants = _all_restaurants
+else:
+    visible_restaurants = {lid: r for lid, r in _all_restaurants.items() if lid in _allowed}
+
 # ── Session State ────────────────────────────────────────────────────────────
-if "reviews" not in st.session_state:
+if "location_id" not in st.session_state:
+    st.session_state.location_id = next(iter(visible_restaurants))
+
+def _reset_reviews():
     st.session_state.reviews = []
     st.session_state.unanswered = []
     st.session_state.answered = []
     st.session_state.examples = []
+    st.session_state.analytics_loaded = False
+    st.session_state.analytics_data = {}
+
+if "reviews" not in st.session_state:
+    _reset_reviews()
 if "analytics_loaded" not in st.session_state:
     st.session_state.analytics_loaded = False
 if "analytics_data" not in st.session_state:
     st.session_state.analytics_data = {}
+
+# Shortcut to the currently active restaurant config
+current_restaurant = visible_restaurants[st.session_state.location_id]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -54,13 +120,35 @@ def all_parsed() -> list:
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🏨 Pensjonat Rybical")
-    st.caption("Panel zarządzania opiniami")
+    st.title("🏨 Panel Opinii")
+    st.caption(f"Zalogowany: **{st.session_state.user}**")
+    if st.button("Wyloguj", use_container_width=True):
+        del st.session_state.user
+        st.rerun()
+    st.divider()
+
+    # Restaurant selector (hidden when user has access to only one property)
+    if len(visible_restaurants) > 1:
+        location_names = {lid: r["name"] for lid, r in visible_restaurants.items()}
+        selected_name = st.selectbox(
+            "Obiekt",
+            list(location_names.values()),
+            index=list(location_names.keys()).index(st.session_state.location_id),
+        )
+        selected_id = next(lid for lid, name in location_names.items() if name == selected_name)
+        if selected_id != st.session_state.location_id:
+            st.session_state.location_id = selected_id
+            _reset_reviews()
+            st.rerun()
+        current_restaurant = visible_restaurants[st.session_state.location_id]
+    else:
+        st.markdown(f"**{current_restaurant['name']}**")
+
     st.divider()
 
     if st.button("🔄 Pobierz opinie z Google", use_container_width=True, type="primary"):
         with st.spinner("Pobieram opinie z Google API..."):
-            raw = get_rybical_reviews()
+            raw = get_reviews(current_restaurant["account_id"], current_restaurant["id"])
             st.session_state.reviews = raw
             u, a, e = parse_reviews_to_lists(raw)
             st.session_state.unanswered = u
@@ -290,7 +378,8 @@ with tab_new:
                     ):
                         with st.spinner("Analiza AI w toku…"):
                             analysis = analyze_review_and_suggest_response(
-                                r["comment"], r["rating"], r["reviewer"], st.session_state.examples
+                                r["comment"], r["rating"], r["reviewer"], st.session_state.examples,
+                                current_restaurant["context"],
                             )
                             st.session_state[gen_key] = analysis
                         st.rerun()
@@ -429,7 +518,7 @@ with tab_analytics:
         if not st.session_state.analytics_loaded:
             if st.button("📊 Generuj Analitykę AI", use_container_width=True, type="primary"):
                 with st.spinner("Przeszukuję wszystkie opinie, szukam trendów…"):
-                    analytics = generate_analytics_dashboard(st.session_state.answered)
+                    analytics = generate_analytics_dashboard(st.session_state.answered, current_restaurant["context"])
                     st.session_state.analytics_data = analytics
                     st.session_state.analytics_loaded = True
                 st.rerun()

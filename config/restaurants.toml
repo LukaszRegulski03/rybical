@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Restaurant / property configuration
+# Add a new [[locations]] block for each property.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[locations]]
+id          = "8962787873732607458"
+account_id  = "114674571764534564133"
+name        = "Pensjonat Rybical"
+context     = """Pensjonat Rybical is an intimate, family-run guesthouse and boutique retreat located directly on the shores of Lake Ryńskie in the village of Rybical, within Poland's beautiful Masurian Lake District. It is situated in a tranquil area near the towns of Ryn and Mikołajki.
+
+The guesthouse is highly praised for its peaceful waterfront location and warm, homely atmosphere that offers a perfect escape from the city. Visitors consistently highlight the beautiful natural surroundings, the well-maintained property, and the hosts' dedication to making guests feel welcome.
+
+Accommodations: Offers a variety of classic-style rooms, family studios, and cottages, many featuring lake views, private balconies or terraces, and soundproofing for extra comfort.
+
+Water Activities: Features a private beach area, a private pier, and a small marina. Guests have access to kayaks, pedal boats, and can even rent motorboats right on the property.
+
+Dining: The on-site restaurant serves a highly-rated breakfast with local products and fresh pastries. It specializes in traditional Polish cuisine and also offers vegetarian, vegan, and gluten-free options.
+
+On-site Amenities: Includes a lakeside garden with plenty of sun loungers, an outdoor fireplace and barbecue area, a sauna for relaxation, and indoor entertainment like billiards and table tennis."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Template — copy this block and fill in for each new property:
+# ─────────────────────────────────────────────────────────────────────────────
+# [[locations]]
+# id         = "GOOGLE_LOCATION_ID"
+# account_id = "GOOGLE_ACCOUNT_ID"
+# name       = "Hotel Name"
+# context    = """Describe the property here. This text is injected into every
+# AI prompt, so the more detail the better (location, amenities, dining, etc.)"""

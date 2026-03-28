@@ -25,27 +25,12 @@ client_config = {
     }
 }
 
-ACCOUNT_ID = "114674571764534564133"
-LOCATION_ID = "8962787873732607458"
 SCOPES = ["https://www.googleapis.com/auth/business.manage"]
 
 # OpenAI Config
 openai_client = OpenAI(api_key=os.getenv("CONFIG__OPENAI__KEY"))
 
-# Pensjonat Rybical Context
-HOTEL_CONTEXT = """Pensjonat Rybical is an intimate, family-run guesthouse and boutique retreat located directly on the shores of Lake Ryńskie in the village of Rybical, within Poland's beautiful Masurian Lake District. It is situated in a tranquil area near the towns of Ryn and Mikołajki.
-
-The guesthouse is highly praised for its peaceful waterfront location and warm, homely atmosphere that offers a perfect escape from the city. Visitors consistently highlight the beautiful natural surroundings, the well-maintained property, and the hosts' dedication to making guests feel welcome.
-
-Accommodations: Offers a variety of classic-style rooms, family studios, and cottages, many featuring lake views, private balconies or terraces, and soundproofing for extra comfort.
-
-Water Activities: Features a private beach area, a private pier, and a small marina. Guests have access to kayaks, pedal boats, and can even rent motorboats right on the property.
-
-Dining: The on-site restaurant serves a highly-rated breakfast with local products and fresh pastries. It specializes in traditional Polish cuisine and also offers vegetarian, vegan, and gluten-free options.
-
-On-site Amenities: Includes a lakeside garden with plenty of sun loungers, an outdoor fireplace and barbecue area, a sauna for relaxation, and indoor entertainment like billiards and table tennis."""
-
-def get_rybical_reviews():
+def get_reviews(account_id: str, location_id: str):
     token_json = os.getenv("GOOGLE_TOKEN_JSON")
     if token_json:
         # Streamlit Cloud: use pre-generated token stored in secrets
@@ -73,7 +58,7 @@ def get_rybical_reviews():
     next_page_token = None
     
     while True:
-        url = f"https://mybusiness.googleapis.com/v4/accounts/{ACCOUNT_ID}/locations/{LOCATION_ID}/reviews"
+        url = f"https://mybusiness.googleapis.com/v4/accounts/{account_id}/locations/{location_id}/reviews"
         if next_page_token:
             url += f"?pageToken={next_page_token}"
             
@@ -99,7 +84,7 @@ def get_original_text(review_text: str) -> str:
         return original_text_match.group(1).strip()
     return re.sub(r'\\(Translated by Google\\)\\s*', '', review_text).strip()
 
-def analyze_review_and_suggest_response(review_text: str, rating: str, reviewer: str, examples: list) -> dict:
+def analyze_review_and_suggest_response(review_text: str, rating: str, reviewer: str, examples: list, hotel_context: str) -> dict:
     if not review_text or str(review_text).strip() == "":
         return {
             "good_points": "Brak", 
@@ -111,10 +96,10 @@ def analyze_review_and_suggest_response(review_text: str, rating: str, reviewer:
 
     examples_text = "\\n\\n".join([f"Opinia Gościa: {ex['comment']}\\nTwoja Odpowiedź: {ex['our_response']}" for ex in examples])
 
-    prompt = f"""Jesteś właścicielem Pensjonatu Rybical. Analizujesz opinię gościa i przygotowujesz szkic odpowiedzi.
-    
-Oto kontekst Twojego pensjonatu:
-{HOTEL_CONTEXT}
+    prompt = f"""Jesteś właścicielem obiektu. Analizujesz opinię gościa i przygotowujesz szkic odpowiedzi.
+
+Oto kontekst Twojego obiektu:
+{hotel_context}
 
 Oto przykłady Twoich wcześniejszych odpowiedzi (do naśladowania stylu):
 {examples_text}
@@ -155,7 +140,7 @@ Ocena (Rating): {rating}
     except Exception as e:
         return {"good_points": "Analysis Error", "bad_points": "Analysis Error", "suggested_response": f"Generation Error: {str(e)}"}
 
-def generate_analytics_dashboard(all_answered_reviews: list) -> dict:
+def generate_analytics_dashboard(all_answered_reviews: list, hotel_context: str) -> dict:
     # Compile a big list of text from reviews
     texts = []
     for r in all_answered_reviews:
@@ -167,11 +152,11 @@ def generate_analytics_dashboard(all_answered_reviews: list) -> dict:
     # Take up to last 100 for token limits
     combined_text = "\\n---\\n".join(texts[:100])
     
-    prompt = f"""Jesteś analitykiem gościnności. Poniżej znajduje się lista historycznych opinii gości dla Pensjonatu Rybical.
+    prompt = f"""Jesteś analitykiem gościnności. Poniżej znajduje się lista historycznych opinii gości.
 Twoim zadaniem jest znalezienie najczęściej powtarzających się wzorców i podsumowanie ich.
 
-Kontekst hotelu:
-{HOTEL_CONTEXT}
+Kontekst obiektu:
+{hotel_context}
 
 Zadanie:
 1. Stwórz krótkie, przekrojowe podsumowanie (Executive Summary).
