@@ -8,16 +8,16 @@ import pandas as pd
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow, Flow
+from google_auth_oauthlib.flow import Flow
 from openai import OpenAI
 
 load_dotenv()
 
-# Google API Config
+# Google API Config — web application credentials
 CLIENT_ID = os.getenv("GOOGLE_API_OAUTH_CLIENT_ID")
 CLIENT_SECRET = os.getenv("GOOGLE_API_OAUTH_CLIENT_SECRET")
 client_config = {
-    "installed": {
+    "web": {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
@@ -25,103 +25,120 @@ client_config = {
     }
 }
 
-SCOPES = ["https://www.googleapis.com/auth/business.manage"]
-
-IDENTITY_SCOPES = [
+# Single scope set: user identity + GMB access in one login
+LOGIN_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/business.manage",
 ]
-
-def get_google_login_url(redirect_uri: str) -> str:
-    flow = Flow.from_client_config(client_config, scopes=IDENTITY_SCOPES, redirect_uri=redirect_uri)
-    auth_url, _ = flow.authorization_url(access_type="offline", prompt="select_account")
-    return auth_url
-
-def get_google_user_info(code: str, redirect_uri: str) -> dict:
-    """Exchange OAuth code for user email and name."""
-    flow = Flow.from_client_config(client_config, scopes=IDENTITY_SCOPES, redirect_uri=redirect_uri)
-    flow.fetch_token(code=code)
-    resp = requests.get(
-        "https://www.googleapis.com/oauth2/v2/userinfo",
-        headers={"Authorization": f"Bearer {flow.credentials.token}"},
-    )
-    return resp.json()  # {email, name, picture, ...}
 
 # OpenAI Config
 openai_client = OpenAI(api_key=os.getenv("CONFIG__OPENAI__KEY"))
 
-def get_reviews(account_id: str, location_id: str):
-    token_json = os.getenv("GOOGLE_TOKEN_JSON")
-    if token_json:
-        # Streamlit Cloud: use pre-generated token stored in secrets
-        token_data = json.loads(token_json)
-        creds = Credentials(
-            token=token_data.get("token"),
-            refresh_token=token_data.get("refresh_token"),
-            token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=token_data.get("client_id"),
-            client_secret=token_data.get("client_secret"),
-            scopes=token_data.get("scopes"),
-        )
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-    else:
-        # Local development: use browser-based OAuth flow
-        flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-        creds = flow.run_local_server(port=0)
-    headers = {
-        "Authorization": f"Bearer {creds.token}",
-        "Content-Type": "application/json",
+
+def get_google_login_url(redirect_uri: str) -> str:
+    flow = Flow.from_client_config(client_config, scopes=LOGIN_SCOPES, redirect_uri=redirect_uri)
+    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+    return auth_url
+
+
+def complete_google_login(code: str, redirect_uri: str) -> dict:
+    """Exchange OAuth code for user info + serialisable credential data."""
+    flow = Flow.from_client_config(client_config, scopes=LOGIN_SCOPES, redirect_uri=redirect_uri)
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    resp = requests.get(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {creds.token}"},
+    )
+    user_info = resp.json()
+    return {
+        "email": user_info.get("email", ""),
+        "name": user_info.get("name", ""),
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri or "https://oauth2.googleapis.com/token",
+        "scopes": list(creds.scopes or LOGIN_SCOPES),
     }
-    
+
+
+def list_gmb_locations(creds: Credentials) -> list:
+    """Return [{account_id, location_id, name}] for every GMB location the user manages."""
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
+
+    accounts_resp = requests.get("https://mybusiness.googleapis.com/v4/accounts", headers=headers)
+    accounts = accounts_resp.json().get("accounts", [])
+
+    locations = []
+    for account in accounts:
+        account_name = account["name"]          # e.g. "accounts/114674571764534564133"
+        account_id = account_name.split("/")[-1]
+        locs_resp = requests.get(
+            f"https://mybusiness.googleapis.com/v4/{account_name}/locations",
+            headers=headers,
+        )
+        for loc in locs_resp.json().get("locations", []):
+            location_id = loc["name"].split("/")[-1]
+            locations.append({
+                "account_id": account_id,
+                "location_id": location_id,
+                "name": loc.get("locationName", loc["name"]),
+            })
+    return locations
+
+
+def get_reviews(creds: Credentials, account_id: str, location_id: str) -> list:
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
+
     all_reviews = []
     next_page_token = None
-    
+
     while True:
         url = f"https://mybusiness.googleapis.com/v4/accounts/{account_id}/locations/{location_id}/reviews"
         if next_page_token:
             url += f"?pageToken={next_page_token}"
-            
         response = requests.get(url, headers=headers)
-        
         if response.status_code == 200:
             data = response.json()
-            reviews = data.get("reviews", [])
-            all_reviews.extend(reviews)
-            
+            all_reviews.extend(data.get("reviews", []))
             next_page_token = data.get("nextPageToken")
             if not next_page_token:
                 break
         else:
             print(f"Error {response.status_code}: {response.text}")
             break
-            
+
     return all_reviews
 
+
 def get_original_text(review_text: str) -> str:
-    original_text_match = re.search(r'\\(Original\\)\\s*(.*)', review_text, re.DOTALL | re.IGNORECASE)
+    original_text_match = re.search(r'\(Original\)\s*(.*)', review_text, re.DOTALL | re.IGNORECASE)
     if original_text_match:
         return original_text_match.group(1).strip()
-    return re.sub(r'\\(Translated by Google\\)\\s*', '', review_text).strip()
+    return re.sub(r'\(Translated by Google\)\s*', '', review_text).strip()
+
 
 def analyze_review_and_suggest_response(review_text: str, rating: str, reviewer: str, examples: list, hotel_context: str) -> dict:
     if not review_text or str(review_text).strip() == "":
         return {
-            "good_points": "Brak", 
-            "bad_points": "Brak", 
+            "good_points": "Brak",
+            "bad_points": "Brak",
             "suggested_response": "Dziękujemy za pozytywną ocenę! Zapraszamy ponownie." if rating in ["FOUR", "FIVE"] else "Dziękujemy za opinię."
         }
-        
+
     review_text = get_original_text(review_text)
 
-    examples_text = "\\n\\n".join([f"Opinia Gościa: {ex['comment']}\\nTwoja Odpowiedź: {ex['our_response']}" for ex in examples])
+    examples_text = "\n\n".join([f"Opinia Gościa: {ex['comment']}\nTwoja Odpowiedź: {ex['our_response']}" for ex in examples])
+
+    context_section = f"\nOto kontekst Twojego obiektu:\n{hotel_context}\n" if hotel_context.strip() else ""
 
     prompt = f"""Jesteś właścicielem obiektu. Analizujesz opinię gościa i przygotowujesz szkic odpowiedzi.
-
-Oto kontekst Twojego obiektu:
-{hotel_context}
-
+{context_section}
 Oto przykłady Twoich wcześniejszych odpowiedzi (do naśladowania stylu):
 {examples_text}
 
@@ -133,7 +150,7 @@ Zadanie:
    - Odnieś się uprzejmie do ewentualnych uwag (minusów).
    - Podziękuj za pochwały (plusy).
    - Zwróć się do recenzenta po imieniu, jeśli pasuje ({reviewer}).
-   
+
 Odpowiedz TYLKO i WYŁĄCZNIE obiektem JSON w tym dokładnym formacie (żadnego formatowania markdown, żadnych bloków kodu):
 {{
   "good_points": "...",
@@ -145,44 +162,41 @@ Tekst opinii (wersja oryginalna):
 {review_text}
 Ocena (Rating): {rating}
 """
-    
+
     try:
         resp = openai_client.chat.completions.create(
             model="gpt-4o",
-            response_format={ "type": "json_object" },
+            response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
         )
         text = resp.choices[0].message.content.strip()
         if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\\s*|```$", "", text, flags=re.MULTILINE).strip()
-            
+            text = re.sub(r"^```(?:json)?\s*|```$", "", text, flags=re.MULTILINE).strip()
         return json.loads(text)
     except Exception as e:
         return {"good_points": "Analysis Error", "bad_points": "Analysis Error", "suggested_response": f"Generation Error: {str(e)}"}
 
+
 def generate_analytics_dashboard(all_answered_reviews: list, hotel_context: str) -> dict:
-    # Compile a big list of text from reviews
     texts = []
     for r in all_answered_reviews:
         text = get_original_text(r.get("comment", ""))
         rating = r.get("rating", "")
         if text:
             texts.append(f"[{rating} STARS]: {text}")
-            
-    # Take up to last 100 for token limits
-    combined_text = "\\n---\\n".join(texts[:100])
-    
+
+    combined_text = "\n---\n".join(texts[:100])
+
+    context_section = f"\nKontekst obiektu:\n{hotel_context}\n" if hotel_context.strip() else ""
+
     prompt = f"""Jesteś analitykiem gościnności. Poniżej znajduje się lista historycznych opinii gości.
 Twoim zadaniem jest znalezienie najczęściej powtarzających się wzorców i podsumowanie ich.
-
-Kontekst obiektu:
-{hotel_context}
-
+{context_section}
 Zadanie:
 1. Stwórz krótkie, przekrojowe podsumowanie (Executive Summary).
-2. Wypisz 3-5 elementów, za które goście chwalą pensjonat najbardziej (najlepiej z określeniem np. "chwalone w ponad 60% opinii").
-3. Wypisz wszystkie najczęstsze skargi, braki lub obszary do poprawy, aby zarząd wiedział, co naprawić.
+2. Wypisz 3-5 elementów, za które goście chwalą obiekt najbardziej (najlepiej z określeniem np. "chwalone w ponad 60% opinii").
+3. Wypisz wszystkie najczęstsze skargi, braki lub obszary do poprawy.
 
 Zwróć odpowiedź TYLKO w formie JSON:
 {{
@@ -198,23 +212,23 @@ Opinie:
     try:
         resp = openai_client.chat.completions.create(
             model="gpt-4o",
-            response_format={ "type": "json_object" },
+            response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
         text = resp.choices[0].message.content.strip()
         if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\\s*|```$", "", text, flags=re.MULTILINE).strip()
-            
+            text = re.sub(r"^```(?:json)?\s*|```$", "", text, flags=re.MULTILINE).strip()
         return json.loads(text)
     except Exception as e:
         return {"executive_summary": "Error", "top_praises": [], "areas_to_improve": [str(e)]}
+
 
 def parse_reviews_to_lists(reviews):
     unanswered = []
     answered = []
     examples = []
-    
+
     for r in reviews:
         comment = r.get("comment", "")
         create_time = r.get("createTime", "")
@@ -223,13 +237,13 @@ def parse_reviews_to_lists(reviews):
             date_str = dt.strftime("%Y-%m-%d")
         except Exception:
             date_str = create_time
-            
+
         rating = r.get("starRating", "")
         reviewer = (r.get("reviewer") or {}).get("displayName", "")
-        
+
         reply_obj = r.get("reviewReply") or {}
         our_response = reply_obj.get("comment", "") if reply_obj else ""
-        
+
         parsed_r = {
             "date": date_str,
             "reviewer": reviewer,
@@ -237,12 +251,12 @@ def parse_reviews_to_lists(reviews):
             "comment": comment,
             "our_response": our_response
         }
-        
+
         if our_response:
             answered.append(parsed_r)
             if comment and len(examples) < 10:
                 examples.append({"comment": get_original_text(comment), "our_response": our_response})
         else:
             unanswered.append(parsed_r)
-            
+
     return unanswered, answered, examples

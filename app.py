@@ -1,6 +1,4 @@
 import os
-import tomllib
-from pathlib import Path
 import streamlit as st
 
 # Inject Streamlit Cloud secrets into env vars before utils is imported.
@@ -13,13 +11,15 @@ except Exception:
 
 import pandas as pd
 from datetime import datetime, timedelta
+from google.oauth2.credentials import Credentials
 from utils import (
     get_reviews,
     parse_reviews_to_lists,
     analyze_review_and_suggest_response,
     generate_analytics_dashboard,
     get_google_login_url,
-    get_google_user_info,
+    complete_google_login,
+    list_gmb_locations,
 )
 
 st.set_page_config(
@@ -28,43 +28,22 @@ st.set_page_config(
     layout="wide"
 )
 
-# ── Config loaders ────────────────────────────────────────────────────────────
-@st.cache_resource
-def load_users() -> dict:
-    path = Path(__file__).parent / "config" / "users.toml"
-    with open(path, "rb") as f:
-        return tomllib.load(f)["users"]
-
-
-@st.cache_resource
-def load_restaurants() -> dict:
-    """Returns {location_id: {name, account_id, context}} for all properties."""
-    path = Path(__file__).parent / "config" / "restaurants.toml"
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
-    return {loc["id"]: loc for loc in data["locations"]}
-
-
-# ── Google OAuth login gate ───────────────────────────────────────────────────
 REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8501")
 
+# ── Google OAuth login gate ───────────────────────────────────────────────────
 if "user_email" not in st.session_state:
     code = st.query_params.get("code")
     if code:
-        # Returning from Google — exchange code for user info
         try:
-            info = get_google_user_info(code, REDIRECT_URI)
-            email = info.get("email", "")
-            users = load_users()
-            if email in users:
-                st.session_state.user_email = email
-                st.session_state.user_name = info.get("name", email)
-                st.query_params.clear()
-                st.rerun()
-            else:
-                st.query_params.clear()
-                st.error(f"Brak dostępu. Konto **{email}** nie jest autoryzowane.")
-                st.stop()
+            info = complete_google_login(code, REDIRECT_URI)
+            st.session_state.user_email = info["email"]
+            st.session_state.user_name = info["name"]
+            st.session_state.google_token = info["token"]
+            st.session_state.google_refresh_token = info["refresh_token"]
+            st.session_state.google_token_uri = info["token_uri"]
+            st.session_state.google_scopes = info["scopes"]
+            st.query_params.clear()
+            st.rerun()
         except Exception as e:
             st.query_params.clear()
             st.error(f"Błąd logowania: {e}")
@@ -79,19 +58,43 @@ if "user_email" not in st.session_state:
 
 STAR_MAP = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
 
-# ── Resolve visible restaurants for this user ─────────────────────────────────
-_all_restaurants = load_restaurants()
-_user_cfg = load_users()[st.session_state.user_email]
-_allowed = _user_cfg.get("locations", [])
-if _allowed == ["all"]:
-    visible_restaurants = _all_restaurants
-else:
-    visible_restaurants = {lid: r for lid, r in _all_restaurants.items() if lid in _allowed}
 
-# ── Session State ────────────────────────────────────────────────────────────
+# ── Credential helper ─────────────────────────────────────────────────────────
+def get_creds() -> Credentials:
+    return Credentials(
+        token=st.session_state.google_token,
+        refresh_token=st.session_state.google_refresh_token,
+        token_uri=st.session_state.google_token_uri,
+        client_id=os.getenv("GOOGLE_API_OAUTH_CLIENT_ID"),
+        client_secret=os.getenv("GOOGLE_API_OAUTH_CLIENT_SECRET"),
+        scopes=st.session_state.google_scopes,
+    )
+
+
+# ── Discover GMB locations once per session ───────────────────────────────────
+if "gmb_locations" not in st.session_state:
+    with st.spinner("Łączę z Google Business Profile..."):
+        st.session_state.gmb_locations = list_gmb_locations(get_creds())
+
+if not st.session_state.gmb_locations:
+    st.error("Nie znaleziono żadnych lokalizacji w Google Business Profile dla tego konta.")
+    st.stop()
+
 if "location_id" not in st.session_state:
-    st.session_state.location_id = next(iter(visible_restaurants))
+    st.session_state.location_id = st.session_state.gmb_locations[0]["location_id"]
 
+if "location_context" not in st.session_state:
+    st.session_state.location_context = {}
+
+
+def get_current_location() -> dict:
+    return next(
+        (loc for loc in st.session_state.gmb_locations if loc["location_id"] == st.session_state.location_id),
+        st.session_state.gmb_locations[0],
+    )
+
+
+# ── Session State ─────────────────────────────────────────────────────────────
 def _reset_reviews():
     st.session_state.reviews = []
     st.session_state.unanswered = []
@@ -107,17 +110,13 @@ if "analytics_loaded" not in st.session_state:
 if "analytics_data" not in st.session_state:
     st.session_state.analytics_data = {}
 
-# Shortcut to the currently active restaurant config
-current_restaurant = visible_restaurants[st.session_state.location_id]
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def stars(rating: str) -> str:
     return "⭐" * STAR_MAP.get(rating, 0)
 
 
 def review_uid(r: dict) -> str:
-    """Stable unique key for a review regardless of display order."""
     return f"{r['reviewer']}_{r['date']}_{r['rating']}"
 
 
@@ -125,39 +124,56 @@ def all_parsed() -> list:
     return st.session_state.unanswered + st.session_state.answered
 
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+def current_context() -> str:
+    return st.session_state.location_context.get(st.session_state.location_id, "")
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🏨 Panel Opinii")
-    st.caption(f"Zalogowany: **{st.session_state.user_name}**")
+    st.caption(f"**{st.session_state.user_name}**")
     st.caption(st.session_state.user_email)
     if st.button("Wyloguj", use_container_width=True):
-        del st.session_state.user_email
-        del st.session_state.user_name
+        for key in ["user_email", "user_name", "google_token", "google_refresh_token",
+                    "google_token_uri", "google_scopes", "gmb_locations"]:
+            st.session_state.pop(key, None)
+        _reset_reviews()
         st.rerun()
+
     st.divider()
 
-    # Restaurant selector (hidden when user has access to only one property)
-    if len(visible_restaurants) > 1:
-        location_names = {lid: r["name"] for lid, r in visible_restaurants.items()}
-        selected_name = st.selectbox(
-            "Obiekt",
-            list(location_names.values()),
-            index=list(location_names.keys()).index(st.session_state.location_id),
+    # Location selector — only shown if user manages more than one property
+    if len(st.session_state.gmb_locations) > 1:
+        location_names = [loc["name"] for loc in st.session_state.gmb_locations]
+        current_idx = next(
+            (i for i, loc in enumerate(st.session_state.gmb_locations)
+             if loc["location_id"] == st.session_state.location_id), 0
         )
-        selected_id = next(lid for lid, name in location_names.items() if name == selected_name)
-        if selected_id != st.session_state.location_id:
-            st.session_state.location_id = selected_id
+        selected_name = st.selectbox("Obiekt", location_names, index=current_idx)
+        selected_loc = next(loc for loc in st.session_state.gmb_locations if loc["name"] == selected_name)
+        if selected_loc["location_id"] != st.session_state.location_id:
+            st.session_state.location_id = selected_loc["location_id"]
             _reset_reviews()
             st.rerun()
-        current_restaurant = visible_restaurants[st.session_state.location_id]
     else:
-        st.markdown(f"**{current_restaurant['name']}**")
+        st.markdown(f"**{st.session_state.gmb_locations[0]['name']}**")
+
+    # Optional property description for AI prompts
+    with st.expander("Opis obiektu (dla AI)"):
+        ctx = st.text_area(
+            "Opisz obiekt — lokalizacja, udogodnienia, styl. Im więcej szczegółów, tym lepsze odpowiedzi AI.",
+            value=current_context(),
+            height=140,
+            label_visibility="collapsed",
+        )
+        st.session_state.location_context[st.session_state.location_id] = ctx
 
     st.divider()
 
     if st.button("🔄 Pobierz opinie z Google", use_container_width=True, type="primary"):
+        loc = get_current_location()
         with st.spinner("Pobieram opinie z Google API..."):
-            raw = get_reviews(current_restaurant["account_id"], current_restaurant["id"])
+            raw = get_reviews(get_creds(), loc["account_id"], loc["location_id"])
             st.session_state.reviews = raw
             u, a, e = parse_reviews_to_lists(raw)
             st.session_state.unanswered = u
@@ -180,7 +196,7 @@ with st.sidebar:
         st.metric("Średnia ocena", f"{avg_r:.2f} / 5.0")
 
 
-# ── Tabs ─────────────────────────────────────────────────────────────────────
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_overview, tab_new, tab_history, tab_analytics = st.tabs([
     "📊 Przegląd",
     "⭐ Nowe Opinie",
@@ -208,21 +224,15 @@ with tab_overview:
         this_week = [r for r in parsed if r["date"] >= cutoff_7d]
         prev_week = [r for r in parsed if cutoff_14d <= r["date"] < cutoff_7d]
 
-        # ── Key metrics ──────────────────────────────────────────────────────
         st.subheader("Kluczowe Wskaźniki")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Łącznie opinii", total)
         c2.metric("Średnia ocena", f"{avg_r:.2f} / 5.0")
         c3.metric("Wskaźnik odpowiedzi", f"{resp_rate:.0f}%")
-        c4.metric(
-            "Nowe w tym tygodniu",
-            len(this_week),
-            delta=len(this_week) - len(prev_week),
-        )
+        c4.metric("Nowe w tym tygodniu", len(this_week), delta=len(this_week) - len(prev_week))
 
         st.divider()
 
-        # ── Charts ────────────────────────────────────────────────────────────
         chart_col1, chart_col2 = st.columns(2)
 
         with chart_col1:
@@ -254,14 +264,9 @@ with tab_overview:
 
         st.divider()
 
-        # ── Weekly report ─────────────────────────────────────────────────────
         st.subheader("📅 Raport Tygodniowy")
         w1, w2, w3 = st.columns(3)
-        w1.metric(
-            "Opinie (ten tydzień)",
-            len(this_week),
-            delta=len(this_week) - len(prev_week),
-        )
+        w1.metric("Opinie (ten tydzień)", len(this_week), delta=len(this_week) - len(prev_week))
 
         if this_week:
             week_avg = sum(STAR_MAP.get(r["rating"], 0) for r in this_week) / len(this_week)
@@ -302,7 +307,6 @@ with tab_new:
     elif not st.session_state.unanswered:
         st.success("Wszystkie opinie mają odpowiedź! 🎉")
     else:
-        # ── Controls ──────────────────────────────────────────────────────────
         ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 3])
         with ctrl1:
             sort_by = st.selectbox(
@@ -330,7 +334,8 @@ with tab_new:
                 gen_key = f"gen_{uid}"
                 if gen_key not in st.session_state:
                     analysis = analyze_review_and_suggest_response(
-                        r["comment"], r["rating"], r["reviewer"], st.session_state.examples
+                        r["comment"], r["rating"], r["reviewer"],
+                        st.session_state.examples, current_context(),
                     )
                     st.session_state[gen_key] = analysis
                 progress_bar.progress(
@@ -339,8 +344,6 @@ with tab_new:
                 )
             st.rerun()
 
-        # ── Sort & filter ──────────────────────────────────────────────────────
-        # Keep original index alongside review for stable session-state keys
         indexed = list(enumerate(st.session_state.unanswered))
 
         if sort_by == "Najnowsze":
@@ -357,7 +360,6 @@ with tab_new:
 
         st.caption(f"Wyświetlam **{len(indexed)}** z **{len(st.session_state.unanswered)}** nieobsłużonych opinii.")
 
-        # ── Review cards ───────────────────────────────────────────────────────
         for orig_idx, r in indexed:
             uid = review_uid(r)
             gen_key = f"gen_{uid}"
@@ -381,14 +383,11 @@ with tab_new:
                     st.caption("*(Brak opisu — tylko ocena gwiazdkowa)*")
 
                 if gen_key not in st.session_state:
-                    if st.button(
-                        f"🤖 Wygeneruj sugestię odpowiedzi",
-                        key=f"btn_{uid}",
-                    ):
+                    if st.button("🤖 Wygeneruj sugestię odpowiedzi", key=f"btn_{uid}"):
                         with st.spinner("Analiza AI w toku…"):
                             analysis = analyze_review_and_suggest_response(
-                                r["comment"], r["rating"], r["reviewer"], st.session_state.examples,
-                                current_restaurant["context"],
+                                r["comment"], r["rating"], r["reviewer"],
+                                st.session_state.examples, current_context(),
                             )
                             st.session_state[gen_key] = analysis
                         st.rerun()
@@ -440,7 +439,6 @@ with tab_history:
     else:
         parsed = all_parsed()
 
-        # ── Filters ────────────────────────────────────────────────────────────
         f1, f2, f3 = st.columns([2, 2, 3])
         with f1:
             filter_s = st.multiselect(
@@ -514,7 +512,7 @@ with tab_analytics:
     st.header("Analityka AI — Trendy i Wzorce")
     st.markdown(
         "Analiza wszystkich **odpowiedzianych** opinii w poszukiwaniu powtarzających się wzorców, "
-        "mocnych stron pensjonatu i obszarów wymagających poprawy."
+        "mocnych stron obiektu i obszarów wymagających poprawy."
     )
 
     if not st.session_state.reviews:
@@ -527,7 +525,7 @@ with tab_analytics:
         if not st.session_state.analytics_loaded:
             if st.button("📊 Generuj Analitykę AI", use_container_width=True, type="primary"):
                 with st.spinner("Przeszukuję wszystkie opinie, szukam trendów…"):
-                    analytics = generate_analytics_dashboard(st.session_state.answered, current_restaurant["context"])
+                    analytics = generate_analytics_dashboard(st.session_state.answered, current_context())
                     st.session_state.analytics_data = analytics
                     st.session_state.analytics_loaded = True
                 st.rerun()
