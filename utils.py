@@ -100,7 +100,11 @@ def list_gmb_locations(creds: Credentials) -> list:
         creds.refresh(Request())
     headers = {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
 
-    accounts_resp = requests.get("https://mybusiness.googleapis.com/v4/accounts", headers=headers)
+    # Account Management API v1 (replaces mybusiness.googleapis.com/v4/accounts)
+    accounts_resp = requests.get(
+        "https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
+        headers=headers,
+    )
     if accounts_resp.status_code != 200:
         raise RuntimeError(f"GMB accounts API error {accounts_resp.status_code}: {accounts_resp.text}")
     accounts = accounts_resp.json().get("accounts", [])
@@ -109,18 +113,22 @@ def list_gmb_locations(creds: Credentials) -> list:
     for account in accounts:
         account_name = account["name"]          # e.g. "accounts/114674571764534564133"
         account_id = account_name.split("/")[-1]
+
+        # Business Information API v1 (replaces mybusiness.googleapis.com/v4/.../locations)
         locs_resp = requests.get(
-            f"https://mybusiness.googleapis.com/v4/{account_name}/locations",
+            f"https://mybusinessbusinessinformation.googleapis.com/v1/{account_name}/locations",
+            params={"readMask": "name,title"},
             headers=headers,
         )
         if locs_resp.status_code != 200:
             raise RuntimeError(f"GMB locations API error {locs_resp.status_code}: {locs_resp.text}")
         for loc in locs_resp.json().get("locations", []):
+            # v1 returns "locations/{id}" (not "accounts/{id}/locations/{id}")
             location_id = loc["name"].split("/")[-1]
             locations.append({
                 "account_id": account_id,
                 "location_id": location_id,
-                "name": loc.get("locationName", loc["name"]),
+                "name": loc.get("title", loc["name"]),
             })
     return locations
 
