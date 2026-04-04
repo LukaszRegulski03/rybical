@@ -362,7 +362,7 @@ with tab_new:
         st.caption(f"Wyświetlam **{len(indexed)}** z **{len(st.session_state.unanswered)}** nieobsłużonych opinii.")
 
         for orig_idx, r in indexed:
-            uid = review_uid(r)
+            uid = f"{review_uid(r)}_{orig_idx}"
             gen_key = f"gen_{uid}"
             rating_n = STAR_MAP.get(r["rating"], 0)
 
